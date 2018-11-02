@@ -47,7 +47,7 @@ parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
-parser.add_argument('--reset', type=str, default=0,
+parser.add_argument('--reset', type=int, default=0,
                     help='reset on the sentence boundaries')
 parser.add_argument('--loss', type=str, default='ce',
                     help='loss functions to be used')
@@ -85,7 +85,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 ###############################################################################
 
 corpus = data.Corpus(args.data)
-
+eosidx = corpus.dictionary.get_eos()
 # Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
 # ┌ a g m s ┐
@@ -172,7 +172,7 @@ def evaluate(data_source):
             data, targets = get_batch(data_source, i)
             # gs534 add sentence resetting
             eosidx = corpus.dictionary.get_eos()
-            output, hidden = model(data, hidden, eosidx)
+            output, hidden = model(data, hidden, separate=args.reset, eosidx=eosidx)
             output_flat = output.view(-1, ntokens)
             if args.loss == 'nce':
                 total_loss += len(data) * criterion_test(output_flat, targets).data
@@ -204,7 +204,7 @@ def train():
             loss = criterion(output)
             loss.backward()
         else:
-            output, hidden = model(data, hidden, eosidx)
+            output, hidden = model(data, hidden, separate=args.reset, eosidx=eosidx)
             loss = criterion(output.view(-1, ntokens), targets)
             loss.backward()
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.

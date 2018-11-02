@@ -1,4 +1,5 @@
 import torch.nn as nn
+from torch import cat
 from torch.autograd import Variable
 from linear_nce import linear_nce
 
@@ -53,10 +54,17 @@ class RNNModel(nn.Module):
             self.decoder.bias.data.zero_()
             self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, hidden, eosidx = 0, target=None, outputflag = 0):
+    def forward(self, input, hidden, separate=0, eosidx = 0, target=None, outputflag = 0):
         emb = self.drop(self.encoder(input))
-        emb = self.resetsent(emb, input, eosidx)
-        output, hidden = self.rnn(emb, hidden)
+        output_list = []
+        if separate == 1:
+            for i in range(emb.size(0)):
+                each_output, hidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), hidden)
+                hidden = self.resetsent(hidden, input[i,:], eosidx)
+                output_list.append(each_output)
+            output = cat(output_list, 0)
+        else:
+            output, hidden = self.rnn(emb, hidden)
         output = self.drop(output)
 
         if self.loss_type == 'nce':
@@ -78,12 +86,13 @@ class RNNModel(nn.Module):
                     weight.new_zeros(self.nlayers, bsz, self.nhid))
         else:
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
-    
-    def resetsent(self, emb, input, eosidx):
-        if self.reset == '1':
+    def resetsent(self, hidden, input, eosidx):
+        if self.rnn_type == 'LSTM':
+            outputcell = hidden[0]
+            memorycell = hidden[1]
             mask = input != eosidx
-            expandedmask = mask.unsqueeze(-1).expand_as(emb)
+            expandedmask = mask.unsqueeze(-1).expand_as(outputcell)
             expandedmask = expandedmask.float()
-            return emb*expandedmask
+            return (outputcell*expandedmask, memorycell)
         else:
-            return emb
+            return hidden 
