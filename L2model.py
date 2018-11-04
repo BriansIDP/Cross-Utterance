@@ -6,11 +6,11 @@ from linear_nce import linear_nce
 class L2RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, rnn_type, ntoken, ninp, naux, nutt, nhid, nlayers, dropout=0.5, tie_weights=False, loss_type='ce', unigram_prob = None, num_noise=25, reset=0):
-        super(RNNModel, self).__init__()
+    def __init__(self, rnn_type, ntoken, ninp, nutt, naux, nhid, nlayers, dropout=0.5, tie_weights=False, loss_type='ce', unigram_prob = None, num_noise=25, reset=0):
+        super(L2RNNModel, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(ntoken, ninp)
-        self.compressor = nn.Linear(naux*nutt, naux)
+        self.compressor = nn.Linear(nutt, naux)
         if rnn_type in ['LSTM', 'GRU']:
             self.rnn = getattr(nn, rnn_type)(ninp+naux, nhid, nlayers, dropout=dropout)
         else:

@@ -20,7 +20,7 @@ parser.add_argument('--batchsize', type=int, default=32,
                     help='Batch size used for training')
 parser.add_argument('--uttlookback', type=int, default=1,
                     help='Number of utterance embeddings to be incorporated')
-parser.add_argument('--saveprefix', type=str, default='AMI',
+parser.add_argument('--saveprefix', type=str, default='tensors/AMI',
                     help='Specify which data utterance embeddings saved')
 args = parser.parse_args()
 
@@ -67,6 +67,7 @@ def get_utt_embedding_groups(model):
             utt_embeddings = []
             totalfile = []
             prevemb = [0 for _ in range(args.uttlookback)]
+            embind = []
             for ind, line in enumerate(lines):
                 currentline = []
                 for word in line.strip().split(' '):
@@ -76,8 +77,9 @@ def get_utt_embedding_groups(model):
                 input = input.view(1, -1).t().to(device)
                 rnnout, hidden = model(input, hidden, outputflag=1)
                 if ind > args.uttlookback - 1:
-                    utt_embeddings += [torch.cat(prevemb, 2) for _ in range(len(currentline))]
+                    utt_embeddings.append(torch.cat(prevemb, 2))
                     totalfile += currentline
+                    embind += [ind - args.uttlookback for _ in range(len(currentline))]
                 if args.memorycell:
                     for i in range(args.uttlookback-1):
                         prevemb[i] = prevemb[i+1]
@@ -94,21 +96,7 @@ def get_utt_embedding_groups(model):
                     print('{}/{} completed'.format(ind, len(lines)))
     torch.save(torch.cat(utt_embeddings, 0), args.saveprefix+'_utt_embed.pt')
     torch.save(torch.LongTensor(totalfile), args.saveprefix+'_fullind.pt')
-
-def load_utt_embeddings():
-    return torch.load(args.saveprefix+'_utt_embed.pt'), torch.load(args.saveprefix+'_fullind.pt') 
-
-def batchify(data, utt_embeddings, bsz):
-    # Work out how cleanly we can divide the dataset into bsz parts.
-    embed_size = utt_embeddings.size(2)
-    nbatch = data.size(0) // bsz
-    # Trim off any extra elements that wouldn't cleanly fit (remainders).
-    data = data.narrow(0, 0, nbatch * bsz)
-    utt_embeddings = utt_embeddings.narrow(0, 0, nbatch * bsz)
-    # Evenly divide the data across the bsz batches.
-    data = data.view(bsz, -1).t().contiguous()
-    utt_embeddings = utt_embeddings.view(-1, bsz, embed_size).contiguous()
-    return data.to(device), utt_embeddings.to(device)
+    torch.save(torch.LongTensor(embind), args.saveprefix+'_embind.pt')
 
 print('getting utterances')
 get_utt_embedding_groups(model)
