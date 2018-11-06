@@ -4,6 +4,7 @@ import argparse
 import sys, os
 import torch
 import torch.nn as nn
+import math
 
 import data
 from L2model import L2RNNModel
@@ -14,11 +15,11 @@ parser.add_argument('--data', type=str, default='./data/AMI',
                     help='location of the data corpus')
 parser.add_argument('--model', type=str, default='LSTM',
                     help='type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU)')
-parser.add_argument('--emsize', type=int, default=200,
+parser.add_argument('--emsize', type=int, default=256,
                     help='size of word embeddings')
-parser.add_argument('--nhid', type=int, default=200,
+parser.add_argument('--nhid', type=int, default=256,
                     help='number of hidden units per layer')
-parser.add_argument('--nlayers', type=int, default=2,
+parser.add_argument('--nlayers', type=int, default=1,
                     help='number of layers')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='initial learning rate')
@@ -28,7 +29,7 @@ parser.add_argument('--epochs', type=int, default=30,
                     help='upper epoch limit')
 parser.add_argument('--naux', type=int, default=128,
                     help='auxiliary context info feature dimension (after compressor)')
-parser.add_argument('--dropout', type=float, default=0.2,
+parser.add_argument('--dropout', type=float, default=0.5,
                     help='dropout applied to layers (0 = no dropout)')
 parser.add_argument('--save', type=str, default='model.pt',
                     help='location of the model to be saved')
@@ -42,6 +43,10 @@ parser.add_argument('--bptt', type=int, default=35,
                     help='bptt steps used for training')
 parser.add_argument('--saveprefix', type=str, default='tensors/AMI',
                     help='Specify which data utterance embeddings saved')
+parser.add_argument('--log-interval', type=int, default=200, metavar='N',
+                    help='report interval')
+parser.add_argument('--seed', type=int, default=1000,
+                    help='random seed')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -58,6 +63,10 @@ arglist.append(('Max Epochs', args.epochs))
 arglist.append(('BatchSize', args.batchsize))
 arglist.append(('Sequence Length', args.bptt))
 arglist.append(('Dropout', args.dropout))
+
+torch.manual_seed(args.seed)
+lr = args.lr
+eval_batch_size = 10
 
 def read_in_dict():
     # Read in dictionary
@@ -88,8 +97,8 @@ def get_batch(source, ind, i):
     target = source[i+1:i+1+seq_len].view(-1)
     return data, embind, target, seq_len
 
-def load_utt_embeddings():
-    return torch.load(args.saveprefix+'_utt_embed.pt'), torch.load(args.saveprefix+'_fullind.pt'), torch.load(args.saveprefix+'_embind.pt')
+def load_utt_embeddings(setname):
+    return torch.load(args.saveprefix+setname+'_utt_embed.pt'), torch.load(args.saveprefix+setname+'_fullind.pt'), torch.load(args.saveprefix+setname+'_embind.pt')
 
 def batchify(data, embind, bsz):
     # Work out how cleanly we can divide the dataset into bsz parts.
@@ -107,20 +116,68 @@ def fill_uttemb_batch(utt_embeddings, embind, bsz, bptt):
     batched_utt_embeddings = torch.index_select(utt_embeddings, 0, embind)
     return batched_utt_embeddings.view(bptt, bsz, -1)
 
+def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
+    # Turn on evaluation mode which disables dropout.
+    model.eval()
+    model.set_mode('eval')
+    total_loss = 0.
+    hidden = model.init_hidden(eval_batch_size)
+    with torch.no_grad():
+        for i in range(0, evaldata.size(0) - 1, args.bptt):
+            data, ind, targets, seq_len = get_batch(evaldata, embind_batched, i)
+            auxinput = fill_uttemb_batch(utt_embeddings, ind, eval_batch_size, seq_len)
+
+            output, hidden = model(data, auxinput, hidden)
+            output_flat = output.view(-1, ntokens)
+            total_loss += len(data) * criterion(output_flat, targets).data
+            hidden = repackage_hidden(hidden)
+    return total_loss / len(evaldata)
+
 def train(traindata, utt_embeddings, embind_batched, model):
     total_loss = 0.
+    model.train()
+    model.set_mode('train')
+    hidden = model.init_hidden(args.batchsize)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     start_time = time.time()
     for batch, i in enumerate(range(0, traindata.size(0) - 1, args.bptt)):
         data, ind, targets, seq_len = get_batch(traindata, embind_batched, i)
         auxinput = fill_uttemb_batch(utt_embeddings, ind, args.batchsize, seq_len)
-        print('At position {}'.format(i))
+
+        hidden = repackage_hidden(hidden)
+        model.zero_grad()
         
+        output, hidden = model(data, auxinput, hidden)
+        loss = criterion(output.view(-1, ntokens), targets)
+        loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+        optimizer.step()
+        total_loss += loss.item()
+
+        if batch % args.log_interval == 0 and batch > 0:
+            cur_loss = total_loss / args.log_interval
+            elapsed = time.time() - start_time
+            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | ms/batch {:5.2f} | '
+                    'loss {:5.2f} | ppl {:8.2f}'.format(
+                epoch, batch, traindata.size(0) // args.bptt, lr,
+                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
+            total_loss = 0
+            start_time = time.time()
+    return model
 
 # ---------------------
 # Main code starts here
 # ---------------------
-utt_embeddings, totalfile, embind = load_utt_embeddings()
+# Train
+utt_embeddings, totalfile, embind = load_utt_embeddings('train')
 data, embind_batched = batchify(totalfile, embind, args.batchsize)
+# Validation
+valutt_embeddings, valtotalfile, valembind = load_utt_embeddings('valid')
+valdata, valembind_batched = batchify(valtotalfile, valembind, eval_batch_size)
+# Validation
+testutt_embeddings, testtotalfile, testembind = load_utt_embeddings('test')
+testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_size)
 
 # Model and optimizer instantiation
 ntokens = read_in_dict()
@@ -132,27 +189,33 @@ print('Training Start!')
 for pairs in arglist:
     print(pairs[0] + ': ', pairs[1])
 # Loop over epochs.
-lr = args.lr
 best_val_loss = None
 try:
     for epoch in range(1, args.epochs+1):
         epoch_start_time = time.time()
-        train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
+        model = train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
         print('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
-        # val_loss = evaluate(val_data)
-        # print('-' * 89)
-        # print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-        #         'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-        #                                    val_loss, math.exp(val_loss)))
-        # print('-' * 89)
+        val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens)
+        print('-' * 89)
+        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                           val_loss, math.exp(val_loss)))
+        print('-' * 89)
         # Save the model if the validation loss is the best we've seen so far.
-        # if not best_val_loss or val_loss < best_val_loss:
+        if not best_val_loss or val_loss < best_val_loss:
         #     with open(args.save, 'wb') as f:
         #         torch.save(model, f)
-        #     best_val_loss = val_loss
-        # else:
+            best_val_loss = val_loss
+        else:
             # Anneal the learning rate if no improvement has been seen in the validation dataset.
-        #     lr /= 2.0
+            lr /= 2.0
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
+
+# Run on test data.
+test_loss = evaluate(testdata, testutt_embeddings.view(-1, testutt_embeddings.size(2)), testembind_batched, model, ntokens)
+print('=' * 89)
+print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
+    test_loss, math.exp(test_loss)))
+print('=' * 89)

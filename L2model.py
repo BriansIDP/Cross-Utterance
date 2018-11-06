@@ -11,6 +11,7 @@ class L2RNNModel(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(ntoken, ninp)
         self.compressor = nn.Linear(nutt, naux)
+        self.compressReLU = nn.ReLU()
         if rnn_type in ['LSTM', 'GRU']:
             self.rnn = getattr(nn, rnn_type)(ninp+naux, nhid, nlayers, dropout=dropout)
         else:
@@ -60,7 +61,8 @@ class L2RNNModel(nn.Module):
     def forward(self, input, auxiliary, hidden, eosidx = 0, target=None):
         emb = self.drop(self.encoder(input))
         auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
-        to_input = cat([emb, auxiliary_in])
+        auxiliary_in = self.compressReLU(auxiliary_in)
+        to_input = cat([emb, auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1)], 2)
         output, hidden = self.rnn(to_input, hidden)
         output = self.drop(output)
 
@@ -81,12 +83,3 @@ class L2RNNModel(nn.Module):
                     weight.new_zeros(self.nlayers, bsz, self.nhid))
         else:
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
-    
-    def resetsent(self, emb, input, eosidx):
-        if self.reset == '1':
-            mask = input != eosidx
-            expandedmask = mask.unsqueeze(-1).expand_as(emb)
-            expandedmask = expandedmask.float()
-            return emb*expandedmask
-        else:
-            return emb
