@@ -16,8 +16,6 @@ parser.add_argument('--reset', action='store_true',
                     help='reset at sentence boundaries')
 parser.add_argument('--memorycell', action='store_true',
                     help='Use memory cell as input, otherwise use output cell')
-parser.add_argument('--batchsize', type=int, default=32,
-                    help='Batch size used for training')
 parser.add_argument('--uttlookback', type=int, default=1,
                     help='Number of utterance embeddings to be incorporated')
 parser.add_argument('--saveprefix', type=str, default='tensors/AMI',
@@ -62,44 +60,42 @@ def get_utt_embedding_groups(model):
     model.set_mode('eval')
     hidden = model.init_hidden(1)
     with torch.no_grad():
-        with open(os.path.join(args.data, 'train.txt')) as fin:
-            lines = fin.readlines()
-            utt_embeddings = []
-            totalfile = []
-            prevemb = [0 for _ in range(args.uttlookback)]
-            embind = []
-            for ind, line in enumerate(lines):
-                currentline = []
-                for word in line.strip().split(' '):
-                    currentline.append(int(dictionary[word]))
-                currentline.append(eosidx)
-                input = torch.LongTensor(currentline)
-                input = input.view(1, -1).t().to(device)
-                rnnout, hidden = model(input, hidden, outputflag=1)
-                if ind > args.uttlookback - 1:
-                    utt_embeddings.append(torch.cat(prevemb, 2))
-                    totalfile += currentline
-                    embind += [ind - args.uttlookback for _ in range(len(currentline))]
-                if args.memorycell:
-                    for i in range(args.uttlookback-1):
-                        prevemb[i] = prevemb[i+1]
-                    prevemb[args.uttlookback-1] = hidden[1]
-                else:
-                    for i in range(args.uttlookback-1):
-                        prevemb[i] = prevemb[i+1]
-                    prevemb[args.uttlookback-1] = rnnout[-1,:,:]
-                if args.reset:
-                    hidden = model.init_hidden(1)
-                else:
-                    repackage_hidden(hidden)
-                if ind % 1000 == 0 and ind != 0:
-                    print('{}/{} completed'.format(ind, len(lines)))
-    torch.save(torch.cat(utt_embeddings, 0), args.saveprefix+'_utt_embed.pt')
-    torch.save(torch.LongTensor(totalfile), args.saveprefix+'_fullind.pt')
-    torch.save(torch.LongTensor(embind), args.saveprefix+'_embind.pt')
+        for setname in ['train', 'valid', 'test']:
+            with open(os.path.join(args.data, setname+'.txt')) as fin:
+                lines = fin.readlines()
+                utt_embeddings = []
+                totalfile = []
+                prevemb = [0 for _ in range(args.uttlookback)]
+                embind = []
+                for ind, line in enumerate(lines):
+                    currentline = []
+                    for word in line.strip().split(' '):
+                        currentline.append(int(dictionary[word]))
+                    currentline.append(eosidx)
+                    input = torch.LongTensor(currentline)
+                    input = input.view(1, -1).t().to(device)
+                    rnnout, hidden = model(input, hidden, outputflag=1)
+                    if ind > args.uttlookback - 1:
+                        utt_embeddings.append(torch.cat(prevemb, 2))
+                        totalfile += currentline
+                        embind += [ind - args.uttlookback for _ in range(len(currentline))]
+                    if args.memorycell:
+                        for i in range(args.uttlookback-1):
+                            prevemb[i] = prevemb[i+1]
+                        prevemb[args.uttlookback-1] = hidden[1]
+                    else:
+                        for i in range(args.uttlookback-1):
+                            prevemb[i] = prevemb[i+1]
+                        prevemb[args.uttlookback-1] = rnnout[-1,:,:]
+                    if args.reset:
+                        hidden = model.init_hidden(1)
+                    else:
+                        repackage_hidden(hidden)
+                    if ind % 1000 == 0 and ind != 0:
+                        print('{}/{} completed'.format(ind, len(lines)))
+            torch.save(torch.cat(utt_embeddings, 0), args.saveprefix+setname+'_utt_embed.pt')
+            torch.save(torch.LongTensor(totalfile), args.saveprefix+setname+'_fullind.pt')
+            torch.save(torch.LongTensor(embind), args.saveprefix+setname+'_embind.pt')
 
 print('getting utterances')
 get_utt_embedding_groups(model)
-# utt_embeddings, totalfile = load_utt_embeddings()
-# print(utt_embeddings)
-# traindata, auxemb = batchify(totalfile, utt_embeddings, args.batchsize)
