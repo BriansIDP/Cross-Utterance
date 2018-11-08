@@ -21,8 +21,10 @@ parser.add_argument('--nhid', type=int, default=256,
                     help='number of hidden units per layer')
 parser.add_argument('--nlayers', type=int, default=1,
                     help='number of layers')
-parser.add_argument('--lr', type=float, default=0.001,
+parser.add_argument('--lr', type=float, default=20,
                     help='initial learning rate')
+parser.add_argument('--wdecay', type=float, default=1.2e-6,
+                    help='weight decay applied to all weights')
 parser.add_argument('--clip', type=float, default=0.5,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=30,
@@ -35,7 +37,7 @@ parser.add_argument('--save', type=str, default='model.pt',
                     help='location of the model to be saved')
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
-parser.add_argument('--reset', action='store_true',
+parser.add_argument('--reset', type=int, default=0,
                     help='reset at sentence boundaries')
 parser.add_argument('--batchsize', type=int, default=32,
                     help='Batch size used for training')
@@ -75,13 +77,13 @@ def read_in_dict():
     with open(os.path.join(args.data, 'dictionary.txt')) as vocabin:
         lines = vocabin.readlines()
         ntoken = len(lines)
-        # for line in lines:
-        #     ind, word = line.strip().split(' ')
-        #     if word not in dictionary:
-        #         dictionary[word] = ind
-        #     else:
-        #         print("Error! Repeated words in the dictionary!")
-    return ntoken
+        for line in lines:
+            ind, word = line.strip().split(' ')
+            if word not in dictionary:
+                dictionary[word] = ind
+            else:
+                print("Error! Repeated words in the dictionary!")
+    return ntoken, dictionary
 
 def repackage_hidden(h):
     """Wraps hidden states in new Tensors, to detach them from their history."""
@@ -127,7 +129,7 @@ def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
             data, ind, targets, seq_len = get_batch(evaldata, embind_batched, i)
             auxinput = fill_uttemb_batch(utt_embeddings, ind, eval_batch_size, seq_len)
 
-            output, hidden = model(data, auxinput, hidden)
+            output, hidden = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).data
             hidden = repackage_hidden(hidden)
@@ -138,7 +140,8 @@ def train(traindata, utt_embeddings, embind_batched, model):
     model.train()
     model.set_mode('train')
     hidden = model.init_hidden(args.batchsize)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=args.wdecay)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     start_time = time.time()
     for batch, i in enumerate(range(0, traindata.size(0) - 1, args.bptt)):
         data, ind, targets, seq_len = get_batch(traindata, embind_batched, i)
@@ -147,7 +150,7 @@ def train(traindata, utt_embeddings, embind_batched, model):
         hidden = repackage_hidden(hidden)
         model.zero_grad()
         
-        output, hidden = model(data, auxinput, hidden)
+        output, hidden = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx)
         loss = criterion(output.view(-1, ntokens), targets)
         loss.backward()
         
@@ -166,6 +169,11 @@ def train(traindata, utt_embeddings, embind_batched, model):
             start_time = time.time()
     return model
 
+def display_parameters(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print (name, param.data)
+
 # ---------------------
 # Main code starts here
 # ---------------------
@@ -180,7 +188,8 @@ testutt_embeddings, testtotalfile, testembind = load_utt_embeddings('test')
 testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_size)
 
 # Model and optimizer instantiation
-ntokens = read_in_dict()
+ntokens, dictionary = read_in_dict()
+eosidx = int(dictionary['<eos>'])
 model = L2RNNModel(args.model, ntokens, args.emsize, utt_embeddings.size(2), args.naux, args.nhid, args.nlayers, args.dropout, reset=args.reset).to(device)
 criterion = nn.CrossEntropyLoss()
 
@@ -194,6 +203,7 @@ try:
     for epoch in range(1, args.epochs+1):
         epoch_start_time = time.time()
         model = train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
+        # display_parameters(model)
         print('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
         val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens)
         print('-' * 89)
