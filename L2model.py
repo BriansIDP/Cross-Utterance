@@ -58,12 +58,20 @@ class L2RNNModel(nn.Module):
             self.decoder.bias.data.zero_()
             self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, auxiliary, hidden, eosidx = 0, target=None):
+    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None):
         emb = self.drop(self.encoder(input))
         auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
         auxiliary_in = self.compressReLU(auxiliary_in)
-        to_input = cat([emb, auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1)], 2)
-        output, hidden = self.rnn(to_input, hidden)
+        to_input = cat([auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1), emb], 2)
+        output_list = []
+        if separate == 1:
+            for i in range(emb.size(0)):
+                each_output, hidden = self.rnn(to_input[i,:,:].view(1,emb.size(1),-1), hidden)
+                hidden = self.resetsent(hidden, input[i,:], eosidx)
+                output_list.append(each_output)
+            output = cat(output_list, 0)
+        else:
+            output, hidden = self.rnn(to_input, hidden)
         output = self.drop(output)
 
         if self.loss_type == 'nce':
@@ -83,3 +91,17 @@ class L2RNNModel(nn.Module):
                     weight.new_zeros(self.nlayers, bsz, self.nhid))
         else:
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
+
+    def resetsent(self, hidden, input, eosidx):
+        if self.rnn_type == 'LSTM':
+            outputcell = hidden[0]
+            memorycell = hidden[1]
+            mask = input != eosidx
+            expandedmask = mask.unsqueeze(-1).expand_as(outputcell)
+            expandedmask = expandedmask.float()
+            return (outputcell*expandedmask, memorycell*expandedmask)
+        else:
+            mask = input != eosidx
+            expandedmask = mask.unsqueeze(-1).expand_as(hidden)
+            expandedmask = expandedmask.float()
+            return hidden*expandedmask
