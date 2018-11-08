@@ -93,6 +93,9 @@ class RNNModel(nn.Module):
             mask = input != eosidx
             expandedmask = mask.unsqueeze(-1).expand_as(outputcell)
             expandedmask = expandedmask.float()
-            return (outputcell*expandedmask, memorycell)
+            return (outputcell*expandedmask, memorycell*expandedmask)
         else:
-            return hidden 
+            mask = input != eosidx
+            expandedmask = mask.unsqueeze(-1).expand_as(hidden)
+            expandedmask = expandedmask.float()
+            return hidden*expandedmask
