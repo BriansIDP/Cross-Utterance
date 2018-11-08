@@ -25,6 +25,8 @@ parser.add_argument('--nlayers', type=int, default=2,
                     help='number of layers')
 parser.add_argument('--lr', type=float, default=20,
                     help='initial learning rate')
+parser.add_argument('--wdecay', type=float, default=1.2e-6,
+                    help='weight decay applied to all weights')
 parser.add_argument('--clip', type=float, default=0.5,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=40,
@@ -190,7 +192,8 @@ def train():
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(args.batch_size)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=args.wdecay)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i)
         # Starting each batch, we detach the hidden state from how it was previously produced.
