@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch import cat, zeros, matmul
+from torch import cat, zeros, matmul, eye
 from torch.autograd import Variable
 
 class SelfAttenModel(nn.Module):
@@ -20,11 +20,12 @@ class SelfAttenModel(nn.Module):
         self.layer1.weight.data.uniform_(-initrange, initrange)
         self.layer2.weight.data.uniform_(-initrange, initrange)
         
-    def forward(self, uttemb):
+    def forward(self, uttemb, scale=1, device='cuda'):
         if uttemb.size(2) % self.ninp != 0:
             print('Splitting of input embedding is invalid!')
             raise
-        totaloutput = zeros(uttemb.size(0),uttemb.size(1),self.ninp)
+        totaloutput = zeros(uttemb.size(0),uttemb.size(1),self.ninp*self.nweights).to(device)
+        penalty = zeros(uttemb.size(0)).to(device)
         for i in range(uttemb.size(0)):
             procunit = uttemb[i].view(uttemb.size(1), -1, self.ninp)
             intermediate = self.layer1(procunit)
@@ -32,5 +33,8 @@ class SelfAttenModel(nn.Module):
             annotmatrix = self.layer2(intermediate)
             annotmatrix = self.softmax(annotmatrix)
             output = matmul(annotmatrix.transpose(1,2), procunit)
-            totaloutput[i] = output.view(output.size(0), self.ninp)
-        return totaloutput 
+            totaloutput[i] = output.view(output.size(0), output.size(1)*output.size(2))
+            ATA = matmul(annotmatrix.transpose(1,2), annotmatrix)
+            I = eye(self.nweights).to(device)
+            penalty[i] = scale * ((ATA.to(device) - I.expand_as(ATA)) ** 2).sum()
+        return totaloutput, penalty.sum() 
