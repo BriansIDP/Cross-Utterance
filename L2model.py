@@ -7,14 +7,16 @@ from linear_nce import linear_nce
 class L2RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, rnn_type, ntoken, ninp, nutt, naux, nhid, nlayers, dropout=0.5, tie_weights=False, loss_type='ce', unigram_prob = None, num_noise=25, reset=0):
+    def __init__(self, rnn_type, ntoken, ninp, nutt, naux, nhid, nlayers, natten=0, dropout=0.5, tie_weights=False, loss_type='ce', unigram_prob = None, num_noise=25, reset=0, nhead=1):
         super(L2RNNModel, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(ntoken, ninp)
+        if natten != 0:
+            self.selfatten = SelfAttenModel(natten, natten, nhead)
+            self.comp4atten = nn.Linear(natten*nhead, naux)
         self.compressor = nn.Linear(nutt, naux)
         self.compressReLU = nn.ReLU()
         self.compressSig = nn.Sigmoid()
-        self.selfatten = SelfAttenModel()
         if rnn_type in ['LSTM', 'GRU']:
             self.rnn = getattr(nn, rnn_type)(ninp+naux, nhid, nlayers, dropout=dropout)
         else:
@@ -45,6 +47,8 @@ class L2RNNModel(nn.Module):
 
         self.rnn_type = rnn_type
         self.nhid = nhid
+        self.natten = natten
+        self.nhead = nhead
         self.nlayers = nlayers
         self.reset = reset
         self.mode = 'train'
@@ -61,11 +65,16 @@ class L2RNNModel(nn.Module):
             self.decoder.bias.data.zero_()
             self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None):
+    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None, device='cuda'):
         emb = self.drop(self.encoder(input))
-        auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
-        # auxiliary_in = self.compressSig(auxiliary_in)
-        auxiliary_in = self.compressReLU(auxiliary_in)
+        if self.natten != 0:
+            attenout, penalty = self.selfatten(auxiliary, device=device)
+            auxiliary_in = self.comp4atten(attenout.view(attenout.size(0)*attenout.size(1), attenout.size(2)))
+            auxiliary_in = self.compressReLU(auxiliary_in)
+        else:
+            auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
+            # auxiliary_in = self.compressSig(auxiliary_in)
+            auxiliary_in = self.compressReLU(auxiliary_in)
         to_input = cat([auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1), emb], 2)
         output_list = []
         if separate == 1:
@@ -83,10 +92,10 @@ class L2RNNModel(nn.Module):
                 decoded = self.decoder(output.view(output.size(0)*output.size(1), output.size(2)), mode='eval_full')
             else:
                 decoded = self.decoder(output.view(output.size(0)*output.size(1), output.size(2)), target, mode='train', num_noise=self.num_noise)
-            return decoded, hidden
+            return decoded, hidden, penalty
         else:
             decoded = self.decoder(output.view(output.size(0)*output.size(1), output.size(2)))
-            return decoded.view(output.size(0), output.size(1), decoded.size(1)), hidden
+            return decoded.view(output.size(0), output.size(1), decoded.size(1)), hidden, penalty
 
     def init_hidden(self, bsz):
         weight = next(self.parameters())
