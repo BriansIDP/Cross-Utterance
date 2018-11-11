@@ -65,6 +65,7 @@ arglist.append(('Max Epochs', args.epochs))
 arglist.append(('BatchSize', args.batchsize))
 arglist.append(('Sequence Length', args.bptt))
 arglist.append(('Dropout', args.dropout))
+arglist.append(('Weight Decay', args.wdecay))
 
 torch.manual_seed(args.seed)
 lr = args.lr
