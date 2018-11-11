@@ -134,7 +134,7 @@ def get_utt_embeddings(model):
                     input = input.view(1, -1).t().to(device)
                     rnnout, hidden = model(input, hidden, outputflag=1)
                     totalfile += currentline
-                    filecontext += [context] * len(currentline)
+                    filecontext += [ind * len(currentline)]
                     if args.memorycell:
                         utt_embeddings.append(hidden[1])
                     else:
