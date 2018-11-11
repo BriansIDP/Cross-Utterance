@@ -49,8 +49,12 @@ parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
 parser.add_argument('--seed', type=int, default=1000,
                     help='random seed')
+parser.add_argument('--useatten', action='store_true',
+                    help='Use self attentive mechanism')
 parser.add_argument('--context', type=str, default='0',
                     help='Specify which utterance embeddings to be used')
+parser.add_argument('--nhead', type=int, default=1,
+                    help='Head number for multi-head self-attention')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -68,14 +72,16 @@ arglist.append(('BatchSize', args.batchsize))
 arglist.append(('Sequence Length', args.bptt))
 arglist.append(('Dropout', args.dropout))
 arglist.append(('Weight Decay', args.wdecay))
+arglist.append(('Context', args.context))
+if args.useatten:
+    print('Using multi-head self-attention with head number: ')
+    arglist.append(('Context', args.nhead))
 
 torch.manual_seed(args.seed)
 lr = args.lr
 eval_batch_size = 10
 context = args.context.strip().split(' ')
 context = [int(i) for i in context]
-print('Context to be included:')
-print(context)
 
 def read_in_dict():
     # Read in dictionary
@@ -153,7 +159,7 @@ def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
             data, ind, targets, seq_len = get_batch(evaldata, embind_batched, i)
             auxinput = fill_uttemb_batch(utt_embeddings, ind, eval_batch_size, seq_len)
 
-            output, hidden = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx)
+            output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).data
             hidden = repackage_hidden(hidden)
@@ -174,8 +180,8 @@ def train(traindata, utt_embeddings, embind_batched, model):
         hidden = repackage_hidden(hidden)
         model.zero_grad()
         
-        output, hidden = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx)
-        loss = criterion(output.view(-1, ntokens), targets)
+        output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device)
+        loss = criterion(output.view(-1, ntokens), targets) + penalty
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -205,22 +211,22 @@ ntokens, dictionary = read_in_dict()
 eosidx = int(dictionary['<eos>'])
 # Train
 utt_embeddings, totalfile, embind = load_utt_embeddings('train')
-if args.context != '0':
-    embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
+embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
 data, embind_batched = batchify(totalfile, embind, args.batchsize)
 # Validation
 valutt_embeddings, valtotalfile, valembind = load_utt_embeddings('valid')
-if args.context != '0':
-    valembind = reorder_context(valtotalfile, context, eosidx, valutt_embeddings.size(0))
+valembind = reorder_context(valtotalfile, context, eosidx, valutt_embeddings.size(0))
 valdata, valembind_batched = batchify(valtotalfile, valembind, eval_batch_size)
 # Validation
 testutt_embeddings, testtotalfile, testembind = load_utt_embeddings('test')
-if args.context != '0':
-    testembind = reorder_context(testtotalfile, context, eosidx, testutt_embeddings.size(0))
+testembind = reorder_context(testtotalfile, context, eosidx, testutt_embeddings.size(0))
 testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_size)
 
 # Model and optimizer instantiation
-model = L2RNNModel(args.model, ntokens, args.emsize, utt_embeddings.size(2) * embind.size(1), args.naux, args.nhid, args.nlayers, args.dropout, reset=args.reset).to(device)
+natten = 0
+if args.useatten:
+    natten = utt_embeddings.size(2)
+model = L2RNNModel(args.model, ntokens, args.emsize, utt_embeddings.size(2) * embind.size(1), args.naux, args.nhid, args.nlayers, natten, args.dropout, reset=args.reset, nhead=args.nhead).to(device)
 criterion = nn.CrossEntropyLoss()
 
 # Start training
