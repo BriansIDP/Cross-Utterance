@@ -1,6 +1,7 @@
 import torch.nn as nn
 from torch import cat
 from torch.autograd import Variable
+from SelfAtten import SelfAttenModel
 from linear_nce import linear_nce
 
 class L2RNNModel(nn.Module):
@@ -12,6 +13,8 @@ class L2RNNModel(nn.Module):
         self.encoder = nn.Embedding(ntoken, ninp)
         self.compressor = nn.Linear(nutt, naux)
         self.compressReLU = nn.ReLU()
+        self.compressSig = nn.Sigmoid()
+        self.selfatten = SelfAttenModel()
         if rnn_type in ['LSTM', 'GRU']:
             self.rnn = getattr(nn, rnn_type)(ninp+naux, nhid, nlayers, dropout=dropout)
         else:
@@ -61,6 +64,7 @@ class L2RNNModel(nn.Module):
     def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None):
         emb = self.drop(self.encoder(input))
         auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
+        # auxiliary_in = self.compressSig(auxiliary_in)
         auxiliary_in = self.compressReLU(auxiliary_in)
         to_input = cat([auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1), emb], 2)
         output_list = []
