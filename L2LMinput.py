@@ -17,7 +17,11 @@ parser.add_argument('--reset', action='store_true',
 parser.add_argument('--memorycell', action='store_true',
                     help='Use memory cell as input, otherwise use output cell')
 parser.add_argument('--uttlookback', type=int, default=1,
-                    help='Number of utterance embeddings to be incorporated')
+                    help='Number of backward utterance embeddings to be incorporated')
+parser.add_argument('--uttlookforward', type=int, default=1,
+                    help='Number of forward utterance embeddings to be incorporated')
+parser.add_argument('--excludeself', type=int, default=1,
+                    help='current utterance embeddings to be incorporated')
 parser.add_argument('--saveprefix', type=str, default='tensors/AMI',
                     help='Specify which data utterance embeddings saved')
 args = parser.parse_args()
@@ -66,6 +70,7 @@ def get_utt_embedding_groups(model):
                 utt_embeddings = []
                 totalfile = []
                 prevemb = [0 for _ in range(args.uttlookback)]
+                postemb = [0 for _ in range(args.uttlookforward)]
                 embind = []
                 for ind, line in enumerate(lines):
                     currentline = []
@@ -97,5 +102,54 @@ def get_utt_embedding_groups(model):
             torch.save(torch.LongTensor(totalfile), args.saveprefix+setname+'_fullind.pt')
             torch.save(torch.LongTensor(embind), args.saveprefix+setname+'_embind.pt')
 
+def get_utt_embeddings(model): 
+    model.eval()
+    model.set_mode('eval')
+    hidden = model.init_hidden(1)
+    with torch.no_grad():
+        for setname in ['train', 'valid', 'test']: 
+            with open(os.path.join(args.data, setname+'.txt')) as fin:
+                lines = fin.readlines()
+                Nlines = len(lines)
+                utt_embeddings = []
+                totalfile = []
+                filecontext = []
+                for ind, line in enumerate(lines):
+                    currentline = []
+                    context = []
+                    for word in line.strip().split(' '):
+                        currentline.append(int(dictionary[word]))
+                    currentline.append(eosidx)
+                    for i in range(ind-args.uttlookback,ind):
+                        if i >= 0:
+                            context.append(i)
+                        else:
+                            context.append(0)
+                    for i in range(ind+args.excludeself,ind+args.uttlookforward+1):
+                        if i < Nlines:
+                            context.append(i)
+                        else:
+                            context.append(Nlines-1)
+                    input = torch.LongTensor(currentline)
+                    input = input.view(1, -1).t().to(device)
+                    rnnout, hidden = model(input, hidden, outputflag=1)
+                    totalfile += currentline
+                    filecontext += [context] * len(currentline)
+                    if args.memorycell:
+                        utt_embeddings.append(hidden[1])
+                    else:
+                        utt_embeddings.append(rnnout)
+                    if args.reset:
+                        hidden = model.init_hidden(1)
+                    else:
+                        repackage_hidden(hidden)
+                    if ind % 1000 == 0 and ind != 0:
+                        print('{}/{} completed'.format(ind, len(lines)))
+            torch.save(torch.cat(utt_embeddings, 0), args.saveprefix+setname+'_utt_embed.pt')
+            torch.save(torch.LongTensor(totalfile), args.saveprefix+setname+'_fullind.pt')
+            torch.save(torch.LongTensor(filecontext), args.saveprefix+setname+'_embind.pt')
+    return totalfile, utt_embeddings, filecontext
+
 print('getting utterances')
-get_utt_embedding_groups(model)
+# get_utt_embedding_groups(model)
+totalfile, utt_embeddings, filecontext = get_utt_embeddings(model)
