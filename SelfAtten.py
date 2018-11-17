@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch import cat, zeros, matmul, eye
+from torch import cat, zeros, matmul, eye, set_printoptions
 from torch.autograd import Variable
 
 class SelfAttenModel(nn.Module):
@@ -20,7 +20,7 @@ class SelfAttenModel(nn.Module):
         self.layer1.weight.data.uniform_(-initrange, initrange)
         self.layer2.weight.data.uniform_(-initrange, initrange)
         
-    def forward(self, uttemb, scale=1, device='cuda'):
+    def forward(self, uttemb, scale=1, device='cuda', writeout=False):
         if uttemb.size(2) % self.ninp != 0:
             print('Splitting of input embedding is invalid!')
             raise
