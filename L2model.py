@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch import cat
+from torch import cat, zeros
 from torch.autograd import Variable
 from SelfAtten import SelfAttenModel
 from linear_nce import linear_nce
@@ -65,10 +65,11 @@ class L2RNNModel(nn.Module):
             self.decoder.bias.data.zero_()
             self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None, device='cuda'):
+    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None, device='cuda', writeout=False):
         emb = self.drop(self.encoder(input))
+        penalty = zeros(1).to(device)
         if self.natten != 0:
-            attenout, penalty = self.selfatten(auxiliary, device=device)
+            attenout, penalty = self.selfatten(auxiliary, device=device, writeout=writeout)
             auxiliary_in = self.comp4atten(attenout.view(attenout.size(0)*attenout.size(1), attenout.size(2)))
             auxiliary_in = self.compressReLU(auxiliary_in)
         else:
