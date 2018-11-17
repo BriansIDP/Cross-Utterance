@@ -55,6 +55,8 @@ parser.add_argument('--context', type=str, default='0',
                     help='Specify which utterance embeddings to be used')
 parser.add_argument('--nhead', type=int, default=1,
                     help='Head number for multi-head self-attention')
+parser.add_argument('--alpha', type=float, default=0.01,
+                    help='Penalty term scale for multi-head self-attention')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -75,7 +77,7 @@ arglist.append(('Weight Decay', args.wdecay))
 arglist.append(('Context', args.context))
 if args.useatten:
     print('Using multi-head self-attention with head number: ')
-    arglist.append(('Context', args.nhead))
+    print(args.nhead)
 
 torch.manual_seed(args.seed)
 lr = args.lr
@@ -148,7 +150,7 @@ def fill_uttemb_batch(utt_embeddings, embind, bsz, bptt):
     batched_utt_embeddings = torch.index_select(utt_embeddings, 0, embind)
     return batched_utt_embeddings.view(bptt, bsz, -1)
 
-def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
+def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens, writeout=False):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     model.set_mode('eval')
@@ -159,7 +161,7 @@ def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
             data, ind, targets, seq_len = get_batch(evaldata, embind_batched, i)
             auxinput = fill_uttemb_batch(utt_embeddings, ind, eval_batch_size, seq_len)
 
-            output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device)
+            output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device, writeout=writeout)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).data
             hidden = repackage_hidden(hidden)
@@ -167,6 +169,7 @@ def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens):
 
 def train(traindata, utt_embeddings, embind_batched, model):
     total_loss = 0.
+    total_penalty = 0.
     model.train()
     model.set_mode('train')
     hidden = model.init_hidden(args.batchsize)
@@ -181,21 +184,28 @@ def train(traindata, utt_embeddings, embind_batched, model):
         model.zero_grad()
         
         output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device)
-        loss = criterion(output.view(-1, ntokens), targets) + penalty
-        loss.backward()
+        loss = criterion(output.view(-1, ntokens), targets)
+        if penalty == 0:
+            loss.backward()
+        else:
+            ploss = loss + args.alpha * penalty
+            ploss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         optimizer.step()
         total_loss += loss.item()
+        total_penalty += args.alpha * penalty
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
+            cur_penalty = total_penalty / args.log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | ms/batch {:5.2f} | '
-                    'loss {:5.2f} | ppl {:8.2f}'.format(
+                    'loss {:5.2f} | ppl {:8.2f} | penalty {:2.2f}'.format(
                 epoch, batch, traindata.size(0) // args.bptt, lr,
-                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
-            total_loss = 0
+                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), float(cur_penalty)))
+            total_loss = 0.
+            total_penalty = 0.
             start_time = time.time()
     return model
 
@@ -241,7 +251,7 @@ try:
         model = train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
         # display_parameters(model)
         print('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
-        val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens)
+        val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens, writeout=True)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                 'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
