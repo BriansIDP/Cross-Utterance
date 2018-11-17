@@ -1,3 +1,4 @@
+from __future__ import print_function
 import torch.nn as nn
 from torch import cat
 from torch.autograd import Variable
@@ -43,6 +44,7 @@ class RNNModel(nn.Module):
         self.nlayers = nlayers
         self.reset = reset
         self.mode = 'train'
+        self.grads = {}
 
     def set_mode(self, m):
         self.mode = m
@@ -59,8 +61,8 @@ class RNNModel(nn.Module):
         output_list = []
         if separate == 1:
             for i in range(emb.size(0)):
-                each_output, hidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), hidden)
-                hidden = self.resetsent(hidden, input[i,:], eosidx)
+                each_output, rawhidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), hidden)
+                hidden = self.resetsent(rawhidden, input[i,:], eosidx)
                 output_list.append(each_output)
             output = cat(output_list, 0)
         else:
