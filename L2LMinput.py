@@ -118,38 +118,43 @@ def get_utt_embeddings(model):
                     currentline = []
                     context = []
                     for word in line.strip().split(' '):
-                        currentline.append(int(dictionary[word]))
+                        if word in dictionary:
+                            currentline.append(int(dictionary[word]))
+                        else:
+                            currentline.append(int(dictionary['OOV']))
                     currentline.append(eosidx)
-                    for i in range(ind-args.uttlookback,ind):
-                        if i >= 0:
-                            context.append(i)
-                        else:
-                            context.append(0)
-                    for i in range(ind+args.excludeself,ind+args.uttlookforward+1):
-                        if i < Nlines:
-                            context.append(i)
-                        else:
-                            context.append(Nlines-1)
+                    # for i in range(ind-args.uttlookback,ind):
+                    #     if i >= 0:
+                    #         context.append(i)
+                    #     else:
+                    #         context.append(0)
+                    # for i in range(ind+args.excludeself,ind+args.uttlookforward+1):
+                    #     if i < Nlines:
+                    #         context.append(i)
+                    #     else:
+                    #         context.append(Nlines-1)
+
+                    # Forward starts here
                     input = torch.LongTensor(currentline)
                     input = input.view(1, -1).t().to(device)
                     rnnout, hidden = model(input, hidden, outputflag=1)
                     totalfile += currentline
-                    filecontext += [ind * len(currentline)]
+                    filecontext += [ind for i in range(len(currentline))]
                     if args.memorycell:
                         utt_embeddings.append(hidden[1])
                     else:
                         utt_embeddings.append(rnnout)
                     if args.reset:
                         hidden = model.init_hidden(1)
-                    else:
-                        repackage_hidden(hidden)
+                    # repackage_hidden(hidden)
                     if ind % 1000 == 0 and ind != 0:
                         print('{}/{} completed'.format(ind, len(lines)))
             torch.save(torch.cat(utt_embeddings, 0), args.saveprefix+setname+'_utt_embed.pt')
             torch.save(torch.LongTensor(totalfile), args.saveprefix+setname+'_fullind.pt')
             torch.save(torch.LongTensor(filecontext), args.saveprefix+setname+'_embind.pt')
-    return totalfile, utt_embeddings, filecontext
+
+# def online_forward()
 
 print('getting utterances')
 # get_utt_embedding_groups(model)
-totalfile, utt_embeddings, filecontext = get_utt_embeddings(model)
+get_utt_embeddings(model)
