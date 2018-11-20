@@ -117,6 +117,20 @@ def reorder_context(context, utt_emb_ind, eosidx, totallen):
             index += 1
     return torch.LongTensor(contextlist)
 
+def expand_context(context, utt_index, totallen):
+    contextlist = []
+    for index in utt_index:
+        to_include = []
+        for ind in context:
+            if index+ind < 0:
+                to_include.append(0)
+            elif index+ind > totallen - 1:
+                to_include.append(totallen-1)
+            else:
+                to_include.append(index+ind)
+        contextlist.append(to_include)
+    return torch.LongTensor(contextlist)
+
 def repackage_hidden(h):
     """Wraps hidden states in new Tensors, to detach them from their history."""
     if isinstance(h, torch.Tensor):
@@ -221,15 +235,18 @@ ntokens, dictionary = read_in_dict()
 eosidx = int(dictionary['<eos>'])
 # Train
 utt_embeddings, totalfile, embind = load_utt_embeddings('train')
-embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
+embind = expand_context(context, embind, utt_embeddings.size(0))
+# embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
 data, embind_batched = batchify(totalfile, embind, args.batchsize)
 # Validation
 valutt_embeddings, valtotalfile, valembind = load_utt_embeddings('valid')
-valembind = reorder_context(valtotalfile, context, eosidx, valutt_embeddings.size(0))
+valembind = expand_context(context, valembind, utt_embeddings.size(0))
+# valembind = reorder_context(valtotalfile, context, eosidx, valutt_embeddings.size(0))
 valdata, valembind_batched = batchify(valtotalfile, valembind, eval_batch_size)
 # Validation
 testutt_embeddings, testtotalfile, testembind = load_utt_embeddings('test')
-testembind = reorder_context(testtotalfile, context, eosidx, testutt_embeddings.size(0))
+testembind = expand_context(context, testembind, utt_embeddings.size(0))
+# testembind = reorder_context(testtotalfile, context, eosidx, testutt_embeddings.size(0))
 testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_size)
 
 # Model and optimizer instantiation
