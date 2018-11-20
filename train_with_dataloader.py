@@ -6,8 +6,10 @@ import os
 import torch
 import torch.nn as nn
 import torch.onnx
+from operator import itemgetter
 
 import dataloader
+import dataloader_sep
 import model
 from nce import nce_loss
 
@@ -39,6 +41,8 @@ parser.add_argument('--dropout', type=float, default=0.2,
                     help='dropout applied to layers (0 = no dropout)')
 parser.add_argument('--tied', action='store_true',
                     help='tie the word embedding and softmax weights')
+parser.add_argument('--evalmode', action='store_true',
+                    help='Evaluation only mode')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
@@ -57,6 +61,12 @@ parser.add_argument('--noise_ratio', type=int, default=50,
                     help='set the noise ratio of NCE sampling, the noise')
 parser.add_argument('--norm_term', type=int, default=9,
                     help='set the log normalization term of NCE sampling')
+parser.add_argument('--factor', type=float, default=0.5,
+                    help='interpolation value')
+parser.add_argument('--interp', action='store_true',
+                    help='Linear interpolate with Ngram')
+parser.add_argument('--individual_utt', action='store_true',
+                    help='Evaluate utterance by utterance')
 args = parser.parse_args()
 
 arglist.append(('Data', args.data))
@@ -126,6 +136,7 @@ if args.loss == 'nce':
 else:
     model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied, reset=args.reset)
     criterion = nn.CrossEntropyLoss()
+    interpCrit = nn.CrossEntropyLoss(reduction='none')
 
 if args.cuda:
     model.cuda()
@@ -158,7 +169,7 @@ def get_batch(source, i):
     return data, target
 
 
-def evaluate(data_source):
+def evaluate(data_source, ngramProb=None):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     model.set_mode('eval')
@@ -168,6 +179,8 @@ def evaluate(data_source):
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
             data, targets = get_batch(data_source, i)
+            if ngramProb:
+                _, batch_ngramProb = get_batch(ngramProb, i)
             # gs534 add sentence resetting
             eosidx = dictionary.get_eos()
             output, hidden = model(data, hidden, separate=args.reset, eosidx=eosidx)
@@ -175,9 +188,42 @@ def evaluate(data_source):
             if args.loss == 'nce':
                 total_loss += len(data) * criterion_test(output_flat, targets).data
             else:
-                total_loss += len(data) * criterion(output_flat, targets).data
+                # total_loss += len(data) * criterion(output_flat, targets).data
+                logProb = interpCrit(output.view(-1, ntokens), targets)
+                rnnProbs = torch.exp(-logProb)
+                if args.interp:
+                    final_prob = args.factor * rnnProbs + (1 - args.factor) * batch_ngramProb
+                else:
+                    final_prob = rnnProbs
+                total_loss += (-torch.log(final_prob).sum()) / data.size(1)
             hidden = repackage_hidden(hidden)
     return total_loss / len(data_source)
+
+def sep_evaluate(test_data, test_target, test_lengths, ngramProb=None):
+    # Turn on evaluation mode which disables dropout.
+    model.eval()
+    model.set_mode('eval')
+    total_loss = 0.
+    num_of_words = 0
+    ntokens = len(dictionary)
+    num_of_utt = test_data.size(0) 
+    with torch.no_grad():
+        for i in range(0, num_of_utt, eval_batch_size):
+            seq_len = min(eval_batch_size, num_of_utt-i)
+            hidden = model.init_hidden(seq_len)
+            data = test_data[i:i+eval_batch_size].t()
+            targets = test_target[i:i+eval_batch_size]
+            length = test_lengths[i:i+eval_batch_size]
+            # datapack = nn.utils.rnn.pack_padded_sequence(data, test_lengths, batch_first=True)
+            targetpack = nn.utils.rnn.pack_padded_sequence(targets, length, batch_first=True)
+            # datapack = datapack.to(device)
+            output, hidden = model(data.to(device), hidden, separate=0, eosidx=eosidx, sep=True, length=length)
+            output_packed = nn.utils.rnn.pack_padded_sequence(output, length).data
+            targets = targetpack.data
+            eval_loss = criterion(output_packed, targets.to(device))
+            total_loss += eval_loss * targets.size(0)
+            num_of_words += targets.size(0)
+    return total_loss / num_of_words
 
 def train(model, train_data, lr):
     # Turn on training mode which enables dropout.
@@ -238,47 +284,70 @@ def export_onnx(path, batch_size, seq_len):
     hidden = model.init_hidden(batch_size)
     torch.onnx.export(model, (dummy_input, hidden), path)
 
+def loadNgram(path):
+    probs = []
+    with open(path) as fin:
+        for line in fin:
+            probs.append(float(line.strip()))
+    return torch.Tensor(probs)
+
 print('Training Start!')
 for pairs in arglist:
     print(pairs[0] + ': ', pairs[1])
 # Loop over epochs.
 lr = args.lr
 best_val_loss = None
-train_loader, val_loader, test_loader = dataloader.create(args.data, os.path.join(args.data, 'dictionary.txt'), batchSize=1000000, workers=2)
+train_loader, val_loader, test_loader = dataloader_sep.create(args.data, os.path.join(args.data, 'dictionary.txt'), batchSize=1000000, workers=0, sep=args.individual_utt)
+
+if args.interp:
+    TestNgramData = loadNgram(os.path.join(args.data, 'test_ngram.st'))
+    TestNgramProbs = batchify(TestNgramData, eval_batch_size)
+else:
+    TestNgramProbs = None
 
 # At any point you can hit Ctrl + C to break out of training early.
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        for train_batched in train_loader:
-            print(train_batched.size())
-            train_data = batchify(train_batched, args.batch_size)
-            train(model, train_data, lr)
-        aggregate_valloss = 0.
-        total_valset = 0
-        for val_batched in val_loader:
-            print(val_batched.size())
-            val_data = batchify(val_batched, eval_batch_size)
-            val_loss = evaluate(val_data)
-            aggregate_valloss = aggregate_valloss + val_batched.size()[0] * val_loss
-            total_valset += val_batched.size()[0]
-        val_loss = aggregate_valloss / total_valset    
+if not args.evalmode:
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            for train_batched in train_loader:
+                print(train_batched.size())
+                train_data = batchify(train_batched, args.batch_size)
+                train(model, train_data, lr)
+            aggregate_valloss = 0.
+            total_valset = 0
+            for val_batched in val_loader:
+                if args.individual_utt:
+                    databatchsize = len(val_batched)
+                    val_batched.sort(key=itemgetter(2), reverse=True)
+                    val_data, val_target, val_lengths = zip(*val_batched)
+                    val_data = torch.LongTensor(list(val_data))
+                    val_target = torch.LongTensor(list(val_target))
+                    val_lengths = list(val_lengths)
+                    val_loss = sep_evaluate(val_data, val_target, val_lengths)
+                else:
+                    databatchsize = val_batched.size()[0]
+                    val_data = batchify(val_batched, eval_batch_size)
+                    val_loss = evaluate(val_data)
+                aggregate_valloss = aggregate_valloss + databatchsize * val_loss
+                total_valset += databatchsize
+            val_loss = aggregate_valloss / total_valset    
+            print('-' * 89)
+            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                                val_loss, math.exp(val_loss)))
+            print('-' * 89)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+            else:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= 2.0
+    except KeyboardInterrupt:
         print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        print('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-            with open(args.save, 'wb') as f:
-                torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 2.0
-except KeyboardInterrupt:
-    print('-' * 89)
-    print('Exiting from training early')
+        print('Exiting from training early')
 
 # Load the best saved model.
 with open(args.save, 'rb') as f:
@@ -290,11 +359,22 @@ with open(args.save, 'rb') as f:
 # Run on test data.
 total_testset = 0
 aggregate_testloss = 0.
-for test_batched in val_loader:
-    test_data = batchify(test_batched, eval_batch_size)
-    test_loss = evaluate(test_data)
-    aggregate_testloss = aggregate_testloss + test_batched.size()[0] * test_loss
-    total_testset += test_batched.size()[0]
+for test_batched in test_loader:
+    if args.individual_utt:
+        databatchsize = len(test_batched)
+        test_tuples = test_batched
+        test_tuples.sort(key=itemgetter(2), reverse=True)
+        test_data, test_target, test_lengths = zip(*test_tuples)
+        test_data = torch.LongTensor(list(test_data))
+        test_target = torch.LongTensor(list(test_target))
+        test_lengths = list(test_lengths)
+        test_loss = sep_evaluate(test_data, test_target, test_lengths)
+    else:
+        databatchsize = test_batched.size()[0]
+        test_data = batchify(test_batched, eval_batch_size)
+        test_loss = evaluate(test_data, TestNgramProbs)
+    aggregate_testloss = aggregate_testloss + databatchsize * test_loss
+    total_testset += databatchsize
 test_loss = aggregate_testloss / total_testset
 print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
