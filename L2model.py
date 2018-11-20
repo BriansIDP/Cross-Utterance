@@ -80,8 +80,9 @@ class L2RNNModel(nn.Module):
         output_list = []
         if separate == 1:
             for i in range(emb.size(0)):
-                each_output, hidden = self.rnn(to_input[i,:,:].view(1,emb.size(1),-1), hidden)
                 hidden = self.resetsent(hidden, input[i,:], eosidx)
+                each_output, hidden = self.rnn(to_input[i,:,:].view(1,emb.size(1),-1), hidden)
+                # hidden = self.resetsent(hidden, input[i,:], eosidx)
                 output_list.append(each_output)
             output = cat(output_list, 0)
         else:
