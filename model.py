@@ -61,8 +61,8 @@ class RNNModel(nn.Module):
         output_list = []
         if separate == 1:
             for i in range(emb.size(0)):
-                each_output, rawhidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), hidden)
-                hidden = self.resetsent(rawhidden, input[i,:], eosidx)
+                resethidden = self.resetsent(hidden, input[i,:], eosidx)
+                each_output, hidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), resethidden)
                 output_list.append(each_output)
             output = cat(output_list, 0)
         else:
