@@ -43,6 +43,8 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
+parser.add_argument('--evalmode', action='store_true',
+                    help='Only evaluate')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
 parser.add_argument('--save', type=str, default='model.pt',
@@ -87,6 +89,9 @@ device = torch.device("cuda" if args.cuda else "cpu")
 ###############################################################################
 
 corpus = data.Corpus(args.data)
+print(corpus.train.size())
+print(corpus.valid.size())
+print(corpus.test.size())
 eosidx = corpus.dictionary.get_eos()
 # Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
@@ -130,6 +135,7 @@ if args.loss == 'nce':
 else:
     model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied, reset=args.reset)
     criterion = nn.CrossEntropyLoss()
+    interpCrit = nn.CrossEntropyLoss(reduction='none')
 
 if args.cuda:
     model.cuda()
@@ -180,6 +186,7 @@ def evaluate(data_source):
                 total_loss += len(data) * criterion_test(output_flat, targets).data
             else:
                 total_loss += len(data) * criterion(output_flat, targets).data
+                logProb = interpCrit(output.view(-1, ntokens), targets)
             hidden = repackage_hidden(hidden)
     return total_loss / len(data_source)
 
@@ -209,6 +216,7 @@ def train():
         else:
             output, hidden = model(data, hidden, separate=args.reset, eosidx=eosidx)
             loss = criterion(output.view(-1, ntokens), targets)
+            logProb = interpCrit(output.view(-1, ntokens), targets)
             loss.backward()
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -251,27 +259,28 @@ lr = args.lr
 best_val_loss = None
 
 # At any point you can hit Ctrl + C to break out of training early.
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        train()
-        val_loss = evaluate(val_data)
+if not args.evalmode:
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            train()
+            val_loss = evaluate(val_data)
+            print('-' * 89)
+            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                               val_loss, math.exp(val_loss)))
+            print('-' * 89)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+            else:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= 2.0
+    except KeyboardInterrupt:
         print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        print('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-            with open(args.save, 'wb') as f:
-                torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 2.0
-except KeyboardInterrupt:
-    print('-' * 89)
-    print('Exiting from training early')
+        print('Exiting from training early')
 
 # Load the best saved model.
 with open(args.save, 'rb') as f:
