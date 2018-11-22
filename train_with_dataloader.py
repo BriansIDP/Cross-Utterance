@@ -35,6 +35,8 @@ parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
 parser.add_argument('--batch_size', type=int, default=20, metavar='N',
                     help='batch size')
+parser.add_argument('--eval_batch_size', type=int, default=10, metavar='N',
+                    help='eval batch size')
 parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
 parser.add_argument('--dropout', type=float, default=0.2,
@@ -119,6 +121,8 @@ def batchify(data, bsz):
     return data.to(device)
 
 eval_batch_size = 10
+if args.evalmode:
+    eval_batch_size = args.eval_batch_size
 
 # Export vocabulary
 # with open(os.path.join(args.data, 'dictionary.txt'), 'w') as vocabout:
@@ -179,7 +183,7 @@ def evaluate(data_source, ngramProb=None):
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
             data, targets = get_batch(data_source, i)
-            if ngramProb:
+            if args.interp:
                 _, batch_ngramProb = get_batch(ngramProb, i)
             # gs534 add sentence resetting
             eosidx = dictionary.get_eos()
@@ -302,6 +306,8 @@ train_loader, val_loader, test_loader = dataloader_sep.create(args.data, os.path
 if args.interp:
     TestNgramData = loadNgram(os.path.join(args.data, 'test_ngram.st'))
     TestNgramProbs = batchify(TestNgramData, eval_batch_size)
+    ValNgramData = loadNgram(os.path.join(args.data, 'valid_ngram.st'))
+    ValNgramProbs = batchify(ValNgramData, eval_batch_size)
 else:
     TestNgramProbs = None
 
@@ -380,6 +386,21 @@ print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
+
+if args.evalmode:
+    total_valset = 0
+    aggregate_valloss = 0.
+    for val_batched in val_loader:
+        databatchsize = val_batched.size()[0]
+        val_data = batchify(val_batched, eval_batch_size)
+        val_loss = evaluate(val_data, ValNgramProbs)
+        aggregate_valloss = aggregate_valloss + databatchsize * val_loss
+        total_valset += databatchsize
+    val_loss = aggregate_valloss / total_valset
+    print('=' * 89)
+    print('| End of training | valid loss {:5.2f} | valid ppl {:8.2f}'.format(
+        val_loss, math.exp(val_loss)))
+    print('=' * 89)
 
 if len(args.onnx_export) > 0:
     # Export the model in ONNX format.
