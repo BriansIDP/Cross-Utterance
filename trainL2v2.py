@@ -57,6 +57,12 @@ parser.add_argument('--nhead', type=int, default=1,
                     help='Head number for multi-head self-attention')
 parser.add_argument('--alpha', type=float, default=0.01,
                     help='Penalty term scale for multi-head self-attention')
+parser.add_argument('--evalmode', action='store_true',
+                    help='Evaluation only mode')
+parser.add_argument('--factor', type=float, default=0.5,
+                    help='interpolation value')
+parser.add_argument('--interp', action='store_true',
+                    help='Linear interpolate with Ngram')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -145,6 +151,11 @@ def get_batch(source, ind, i):
     target = source[i+1:i+1+seq_len].view(-1)
     return data, embind, target, seq_len
 
+def get_batch_ngram(source, i):
+    seq_len = min(args.bptt, len(source) - 1 - i)
+    target = source[i+1:i+1+seq_len].view(-1)
+    return target
+
 def load_utt_embeddings(setname):
     return torch.load(args.saveprefix+setname+'_utt_embed.pt'), torch.load(args.saveprefix+setname+'_fullind.pt'), torch.load(args.saveprefix+setname+'_embind.pt')
 
@@ -159,12 +170,22 @@ def batchify(data, embind, bsz):
     embind = embind.view(bsz, -1, embind.size(1)).transpose(0,1).contiguous()
     return data.to(device), embind.to(device)
 
+def batchify_ngram(data, bsz):
+    # Work out how cleanly we can divide the dataset into bsz parts.
+    nbatch = data.size(0) // bsz
+    # Trim off any extra elements that wouldn't cleanly fit (remainders).
+    data = data.narrow(0, 0, nbatch * bsz)
+    # Evenly divide the data across the bsz batches.
+    data = data.view(bsz, -1).t().contiguous()
+    return data.to(device)
+
 def fill_uttemb_batch(utt_embeddings, embind, bsz, bptt):
+    '''Fill current batch with corresponding utterances'''
     embind = embind.view(-1)
     batched_utt_embeddings = torch.index_select(utt_embeddings, 0, embind)
     return batched_utt_embeddings.view(bptt, bsz, -1)
 
-def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens, writeout=False):
+def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens, writeout=False, ngramProb=None):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     model.set_mode('eval')
@@ -173,11 +194,20 @@ def evaluate(evaldata, utt_embeddings, embind_batched, model, ntokens, writeout=
     with torch.no_grad():
         for i in range(0, evaldata.size(0) - 1, args.bptt):
             data, ind, targets, seq_len = get_batch(evaldata, embind_batched, i)
+            if args.interp and args.evalmode:
+                batch_ngramProb = get_batch_ngram(ngramProb, i)
             auxinput = fill_uttemb_batch(utt_embeddings, ind, eval_batch_size, seq_len)
 
             output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device, writeout=writeout)
-            output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).data
+            # output_flat = output.view(-1, ntokens)
+            # total_loss += len(data) * criterion(output_flat, targets).data
+            logProb = interpCrit(output.view(-1, ntokens), targets)
+            rnnProbs = torch.exp(-logProb)
+            if args.interp and args.evalmode:
+                final_prob = args.factor * rnnProbs + (1 - args.factor) * batch_ngramProb
+            else:
+                final_prob = rnnProbs
+            total_loss += (-torch.log(final_prob).sum()) / data.size(1)
             hidden = repackage_hidden(hidden)
     return total_loss / len(evaldata)
 
@@ -223,6 +253,13 @@ def train(traindata, utt_embeddings, embind_batched, model):
             start_time = time.time()
     return model
 
+def loadNgram(path):
+    probs = []
+    with open(path) as fin:
+        for line in fin:
+            probs.append(float(line.strip()))
+    return torch.Tensor(probs)
+
 def display_parameters(model):
     for name, param in model.named_parameters():
         if param.requires_grad:
@@ -234,18 +271,19 @@ def display_parameters(model):
 ntokens, dictionary = read_in_dict()
 eosidx = int(dictionary['<eos>'])
 # Train
-utt_embeddings, totalfile, embind = load_utt_embeddings('train')
-embind = expand_context(context, embind, utt_embeddings.size(0))
-# embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
-data, embind_batched = batchify(totalfile, embind, args.batchsize)
+if not args.evalmode:
+    utt_embeddings, totalfile, embind = load_utt_embeddings('train')
+    embind = expand_context(context, embind, utt_embeddings.size(0))
+    # embind = reorder_context(totalfile, context, eosidx, utt_embeddings.size(0))
+    data, embind_batched = batchify(totalfile, embind, args.batchsize)
 # Validation
 valutt_embeddings, valtotalfile, valembind = load_utt_embeddings('valid')
-valembind = expand_context(context, valembind, utt_embeddings.size(0))
+valembind = expand_context(context, valembind, valutt_embeddings.size(0))
 # valembind = reorder_context(valtotalfile, context, eosidx, valutt_embeddings.size(0))
 valdata, valembind_batched = batchify(valtotalfile, valembind, eval_batch_size)
 # Validation
 testutt_embeddings, testtotalfile, testembind = load_utt_embeddings('test')
-testembind = expand_context(context, testembind, utt_embeddings.size(0))
+testembind = expand_context(context, testembind, testutt_embeddings.size(0))
 # testembind = reorder_context(testtotalfile, context, eosidx, testutt_embeddings.size(0))
 testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_size)
 
@@ -253,8 +291,20 @@ testdata, testembind_batched = batchify(testtotalfile, testembind, eval_batch_si
 natten = 0
 if args.useatten:
     natten = utt_embeddings.size(2)
-model = L2RNNModel(args.model, ntokens, args.emsize, utt_embeddings.size(2) * embind.size(1), args.naux, args.nhid, args.nlayers, natten, args.dropout, reset=args.reset, nhead=args.nhead).to(device)
+if not args.evalmode:
+    model = L2RNNModel(args.model, ntokens, args.emsize, utt_embeddings.size(2) * embind.size(1), args.naux, args.nhid, args.nlayers, natten, args.dropout, reset=args.reset, nhead=args.nhead).to(device)
 criterion = nn.CrossEntropyLoss()
+interpCrit = nn.CrossEntropyLoss(reduction='none')
+
+# Use interpolation with n-gram language models
+if args.interp:
+    TestNgramData = loadNgram(os.path.join(args.data, 'test_ngram.st'))
+    TestNgramProbs = batchify_ngram(TestNgramData, eval_batch_size)
+    ValNgramData = loadNgram(os.path.join(args.data, 'valid_ngram.st'))
+    ValNgramProbs = batchify_ngram(ValNgramData, eval_batch_size)
+else:
+    TestNgramProbs = None
+    ValNgramProbs = None
 
 # Start training
 print('Training Start!')
@@ -262,33 +312,49 @@ for pairs in arglist:
     print(pairs[0] + ': ', pairs[1])
 # Loop over epochs.
 best_val_loss = None
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        model = train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
-        # display_parameters(model)
-        print('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
-        val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens, writeout=True)
+if not args.evalmode:
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            model = train(data, utt_embeddings.view(-1, utt_embeddings.size(2)), embind_batched, model)
+            # display_parameters(model)
+            print('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
+            val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens, writeout=True)
+            print('-' * 89)
+            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                               val_loss, math.exp(val_loss)))
+            print('-' * 89)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+            else:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= 2.0
+    except KeyboardInterrupt:
         print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        print('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-        #     with open(args.save, 'wb') as f:
-        #         torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 2.0
-except KeyboardInterrupt:
-    print('-' * 89)
-    print('Exiting from training early')
+        print('Exiting from training early')
+
+# Load the best saved model.
+with open(args.save, 'rb') as f:
+    model = torch.load(f)
+    # after load the rnn params are not a continuous chunk of memory
+    # this makes them a continuous chunk, and will speed up forward pass
+    model.rnn.flatten_parameters()
 
 # Run on test data.
-test_loss = evaluate(testdata, testutt_embeddings.view(-1, testutt_embeddings.size(2)), testembind_batched, model, ntokens)
+test_loss = evaluate(testdata, testutt_embeddings.view(-1, testutt_embeddings.size(2)), testembind_batched, model, ntokens, ngramProb=TestNgramProbs)
 print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
+
+# Run on dev set again if in eval mode
+if args.evalmode:
+    val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens, writeout=True, ngramProb=ValNgramProbs)
+    print('=' * 89)
+    print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
+        val_loss, math.exp(val_loss)))
+    print('=' * 89)
