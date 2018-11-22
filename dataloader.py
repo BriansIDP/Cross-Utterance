@@ -34,7 +34,7 @@ class Dictionary(object):
         return len(self.idx2word)
 
 class LMdata(Dataset):
-    def __init__(self, data_file, dictionary):
+    def __init__(self, data_file, dictionary, individual_utt = False):
         '''Load data_file'''
         self.data_file = data_file
         self.data = []
@@ -43,6 +43,7 @@ class LMdata(Dataset):
                 words = line.split() + ['<eos>']
                 self.data += words
         self.dictionary = dictionary
+        self.individual_utt = individual_utt
 
     def __len__(self):
         return len(self.data)
